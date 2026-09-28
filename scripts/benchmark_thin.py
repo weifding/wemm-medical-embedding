@@ -8,6 +8,7 @@ benchmark_thin.py
 用法: python scripts/benchmark_thin.py
 输出: 打印表格, 并写入 outputs/benchmark_thin.json
 """
+import argparse
 import json
 import os
 import platform
@@ -37,18 +38,24 @@ GB = 1024 ** 3
 
 
 def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--model_path", default=MODEL, help="待测模型目录")
+    args = p.parse_args()
+    model_path = args.model_path
+    safetensors = os.path.join(model_path, "model.safetensors")
+
     proc = psutil.Process()
-    result = {"model": MODEL, "platform": platform.platform()}
+    result = {"model": model_path, "platform": platform.platform()}
 
     # ---- 文件大小 ----
-    size = os.path.getsize(SAFETENSORS)
+    size = os.path.getsize(safetensors)
     result["file_bytes"] = size
     print(f"模型文件: {size:,} B ({size/GB:.3f} GiB / {size/1e9:.2f} GB)")
 
     # ---- 加载 ----
     base = proc.memory_info().rss
     t0 = time.time()
-    embedder = Embedder(MODEL)          # bf16 + low_cpu_mem_usage (encode.py 现状)
+    embedder = Embedder(model_path)     # bf16 + low_cpu_mem_usage (encode.py 现状)
     load_s = time.time() - t0
     loaded = proc.memory_info().rss
     print(f"加载: {load_s:.1f}s   RSS {base/GB:.3f} -> {loaded/GB:.3f} GB "
@@ -92,14 +99,19 @@ def main():
     result["retrieval"] = rows
 
     # ---- 内存 ----
-    peak = proc.memory_info().peak_wset
+    try:
+        peak = proc.memory_info().peak_wset          # Windows
+    except AttributeError:
+        import resource                                # Linux: ru_maxrss 单位 KB
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
     after = proc.memory_info().rss
     result["rss_after_bench_bytes"] = after
     result["peak_working_set_bytes"] = peak
     print(f"\n内存: RSS(加载后) {loaded/GB:.3f} GB  RSS(结束) {after/GB:.3f} GB  "
           f"Peak WS {peak/GB:.3f} GB")
 
-    out = os.path.join(ROOT, "outputs", "benchmark_thin.json")
+    out = os.path.join(ROOT, "outputs",
+                       f"benchmark_{os.path.basename(os.path.normpath(model_path))}.json")
     with open(out, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     print(f"结果已写入 {out}")

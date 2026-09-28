@@ -1,7 +1,8 @@
 # WeMM 医疗 embedding 项目配置
 
-# 纯文本权重路径（已抽视觉塔，strip_vision.py 输出，推理/训练用）
-model_path: "E:/ChatGPT/wemm-medical-embedding/outputs/wemm-text-only"
+# 最终模型：医疗领域校准 FFN 剪枝 25%（6144→4608，3.31GB，Round 3）
+model_path: "E:/ChatGPT/wemm-medical-embedding/outputs/wemm-medical-pruned25"
+# 剪枝前瘦身基线: E:/ChatGPT/wemm-medical-embedding/outputs/wemm-text-only
 # 原始完整权重存档: E:/ChatGPT/wemm-medical-embedding/models/WeMM-Embedding-2B
 
 # 输出目录
