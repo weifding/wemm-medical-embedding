@@ -1,6 +1,6 @@
 # FFN 领域剪枝记录（Round 3）
 
-日期：2026-09-28 · 执行环境：**192.168.251.15 (pmc-hos)**，RTX 4090 24GB + 32 核 CPU（本地 CPU 太慢，llama-server 经确认后已停止）
+日期：2026-09-28 · 执行环境：远程 RTX 4090 服务器（24GB GPU + 32 核 CPU；本地 CPU 太慢，占用 GPU 的常驻推理服务经确认后已停止）
 代码：`scripts/prune_ffn.py` · 得分缓存：`outputs/ffn_scores.npy`
 
 ## 方法
@@ -40,7 +40,7 @@
 
 ## 产物位置
 
-- 服务器：`pmc@192.168.251.15:/home/pmc/wemm-medical-embedding/outputs/wemm-medical-pruned{25,50}/`
+- 服务器：`<服务器工作目录>/outputs/wemm-medical-pruned{25,50}/`（25% 档已回传本地）
 - 本地（已回传）：`outputs/benchmark_wemm-medical-pruned{25,50}.json`、`outputs/ffn_scores.npy`
 - 模型回传：链路 ~3.2MB/s（3.76GB 用时 20min），如需本地使用按需回传单档
 

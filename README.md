@@ -2,6 +2,10 @@
 
 基于 WeMM-Embedding-2B（Qwen3.5 backbone）做纯文本医疗检索。原方案：抽视觉塔 + LoRA 微调；实际执行为三轮无训练权重瘦身（LoRA 未执行，见下）。
 
+**相关链接**：
+- 原始模型：[tencent/WeMM-Embedding-2B](https://huggingface.co/tencent/WeMM-Embedding-2B) · 原始项目：[Tencent/WeMM-Embedding](https://github.com/Tencent/WeMM-Embedding) · [HF collection](https://huggingface.co/collections/tencent/wemm-embedding)
+- 本项目产物（最终模型）：[ding20260928/wemm-medical-pruned25](https://huggingface.co/ding20260928/wemm-medical-pruned25)
+
 ## 执行总结（2026-09-28）
 
 最终模型 **`outputs/wemm-medical-pruned25/`（3.31GB）**，`config.yaml` 已指向。原始权重完整保留在 `models/WeMM-Embedding-2B/`。
@@ -21,7 +25,7 @@
 **Round 3 — 医疗领域校准 FFN 通道剪枝**（`scripts/prune_ffn.py`）
 - Wanda 式通道得分：`s_j = ||down_proj[:,j]||₂ × RMS_t(silu(gate_j(x)) ⊙ up_j(x))`，在医疗语料（医学教材 200 段 + 医疗 query 100 条）上 batch=1 校准
 - 每层保留得分 top-k 通道（结构化裁 `gate/up` 行与 `down` 列），阶梯 25% / 50% 由同一份基线得分生成
-- 在 192.168.251.15（RTX 4090）执行，校准 300 条仅 33s；**采纳 25% 档**（intermediate 6144→4608），产物 MD5 校验后回传本地；50% 档留服务器作实验
+- 在一台 RTX 4090 服务器上执行（本地 CPU 校准预估 1.5h+，服务器 33s），校准 300 条；**采纳 25% 档**（intermediate 6144→4608），产物 MD5 校验后回传本地；50% 档保留作实验
 
 **配套产出**：`scripts/benchmark_thin.py`（标准 benchmark：文件/内存/吞吐/检索）、`scripts/compare_thin.py`（模型间嵌入漂移对比）、`data/eval_commonsense.jsonl`（常识评估集 8 题）、`docs/benchmark_thin.md`、`docs/prune_ffn.md`（阶梯数据与采纳记录）。
 
@@ -51,6 +55,29 @@
 **结论**：医疗场景检索完全无损，通用能力仅常识集掉 1 题（8 题小样本，1024/512 维无损），换来 **−39% 文件体积与 −36% 运行内存**。R@5/R@10 全程 1.0。
 
 备注：本机 CPU 无原生 BF16，fp32 前向反而比 bf16 快 ~4.5×（GPU 上仍用 bf16）；INT8 量化与 LoRA 微调未执行（分别缺 bitsandbytes / peft，且无 GPU 训练条件）。
+
+## English Summary
+
+This project shrinks **WeMM-Embedding-2B** into a text-only Chinese medical retrieval embedding — from **5.44 GB / 2.72B params down to 3.31 GB / 1.655B params (−39%)** — with three training-free rounds (`config.yaml` points to the final model `outputs/wemm-medical-pruned25/`):
+
+1. **Remove the vision/video tower**: `modeling_wemm_embedding.py` deletes `self.model.visual` in `__init__` (transformers' `Qwen3_5Model` unconditionally rebuilds it from config, so editing config alone is not enough); video-only helper files removed; `strip_vision.py` also purges video/vision token fields from config.
+2. **Remove `lm_head`** (508M params / 1.02 GB logits head the embedding path never uses) and override `forward()` to return hidden states directly. This also **fixed a pre-existing bug**: `encode.py` / `train_lora.py` previously pooled `res[0]` = *logits* (248078-dim wrong vectors) instead of `last_hidden_state` (correct 2048-dim vectors). `encode.py` now defaults to bfloat16 + `low_cpu_mem_usage` on CPU.
+3. **Medical-domain calibrated FFN channel pruning** (`scripts/prune_ffn.py`): Wanda-style channel score `s_j = ||down_proj[:,j]|| × RMS(silu(gate_j(x)) ⊙ up_j(x))` calibrated on 300 medical texts (200 textbook passages + 100 queries, batch=1); each layer keeps the top-k channels. Ladder 25% / 50% generated from the same baseline scores; **the 25% tier was adopted** (intermediate 6144→4608), executed on a remote RTX 4090 machine (33 s calibration), MD5-verified after sync.
+
+**Measured results** (local CPU, identical harness):
+
+| Metric | Original WeMM-2B | Final (pruned 25%) |
+|---|---|---|
+| Model file | 5.44 GB | **3.31 GB (−39%)** |
+| Parameters | 2.72B | **1.655B (−39%)** |
+| bf16 load RSS / peak | 5.53 / 5.61 GB | **3.56 / 3.63 GB (−36%)** |
+| Medical retrieval R@1 (2048/1024/512) | 1.000 | **1.000 (unchanged)** |
+| Commonsense R@1 (8-item set, 2048-dim) | 0.875 | 0.750 (0.875 at 1024/512) |
+| Embedding drift vs original (103 texts) | — | cosine mean 0.941 / min 0.861 |
+
+Medical retrieval is fully lossless; general ability degrades only marginally on a small sample. R@5/R@10 stay 1.0 throughout. LoRA fine-tuning and INT8 quantization from the original plan were **not** executed (missing `peft` / `bitsandbytes`, no local GPU for training).
+
+Tooling added along the way: `benchmark_thin.py` (standard file/memory/throughput/retrieval benchmark), `compare_thin.py` (embedding-drift comparison between any two checkpoints), `eval_commonsense.jsonl` (self-built 8-question commonsense set), records in `docs/benchmark_thin.md` and `docs/prune_ffn.md`.
 
 ## 目录结构
 
