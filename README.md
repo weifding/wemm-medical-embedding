@@ -1,6 +1,56 @@
 # WeMM-Embedding 医疗领域适配方案
 
-基于 WeMM-Embedding-2B（Qwen3.5 backbone）做纯文本医疗检索。两步：抽视觉塔 + LoRA 微调。
+基于 WeMM-Embedding-2B（Qwen3.5 backbone）做纯文本医疗检索。原方案：抽视觉塔 + LoRA 微调；实际执行为三轮无训练权重瘦身（LoRA 未执行，见下）。
+
+## 执行总结（2026-09-28）
+
+最终模型 **`outputs/wemm-medical-pruned25/`（3.31GB）**，`config.yaml` 已指向。原始权重完整保留在 `models/WeMM-Embedding-2B/`。
+
+### 具体做了什么
+
+**Round 1 — 移除视觉/视频塔**
+- 模型复制入项目 `models/`；`modeling_wemm_embedding.py` 的 `__init__` 加载后删除 `self.model.visual`（transformers 的 `Qwen3_5Model.__init__` 会按 config 无条件重建视觉塔，删 config 字段不够，必须在建模代码里删）
+- 删除视频辅助文件（`patch_sglang_video.py`、`processor_config.json`、`modeling_st_wemm.py`、`modules.json`）
+- `strip_vision.py` 扩展清理 config 中 video/vision token 字段 → 产物 `outputs/wemm-text-only/`
+
+**Round 2 — 移除 lm_head + 修复编码 bug**
+- `__init__` 再删 `lm_head`（508M 参数 / 1.02GB logits 头，嵌入路径用不到）；覆写 `forward()` 直返 hidden states
+- **顺带修复既有 bug**：`encode.py`/`train_lora.py` 原先取 `res[0]` = logits（248078 维错误向量），覆写后自动取 `last_hidden_state`（2048 维正确向量）
+- `encode.py` 默认 dtype 改 bfloat16 + `low_cpu_mem_usage`（CPU 推理内存 9.6GB → 4.0GB 量级）
+
+**Round 3 — 医疗领域校准 FFN 通道剪枝**（`scripts/prune_ffn.py`）
+- Wanda 式通道得分：`s_j = ||down_proj[:,j]||₂ × RMS_t(silu(gate_j(x)) ⊙ up_j(x))`，在医疗语料（医学教材 200 段 + 医疗 query 100 条）上 batch=1 校准
+- 每层保留得分 top-k 通道（结构化裁 `gate/up` 行与 `down` 列），阶梯 25% / 50% 由同一份基线得分生成
+- 在 192.168.251.15（RTX 4090）执行，校准 300 条仅 33s；**采纳 25% 档**（intermediate 6144→4608），产物 MD5 校验后回传本地；50% 档留服务器作实验
+
+**配套产出**：`scripts/benchmark_thin.py`（标准 benchmark：文件/内存/吞吐/检索）、`scripts/compare_thin.py`（模型间嵌入漂移对比）、`data/eval_commonsense.jsonl`（常识评估集 8 题）、`docs/benchmark_thin.md`、`docs/prune_ffn.md`（阶梯数据与采纳记录）。
+
+### 效果（本地 CPU 实测，同一测量脚本）
+
+**资源消耗**
+
+| 指标 | 原始 WeMM-2B | R1 去视觉塔 | R2 去 lm_head | **最终（剪枝 25%）** |
+|---|---|---|---|---|
+| 模型文件 | 5.44 GB | 4.78 GB | 3.76 GB | **3.31 GB（−39%）** |
+| 参数量 | 2.72B | 2.39B | 1.88B | **1.655B（−39%）** |
+| bf16 加载 RSS | 5.53 GB | 4.92 GB | 3.98 GB | **3.56 GB（−36%）** |
+| bf16 Peak WS | 5.61 GB | 4.99 GB | 4.04 GB | **3.63 GB** |
+| f32 加载 RSS | 10.61 GB | — | 7.48 GB | **6.65 GB** |
+| 103 条嵌入耗时 | 290 s | — | — | **188 s（−35%）** |
+
+**质量（vs 原始完整模型）**
+
+| 指标 | 原始 | 最终（剪枝 25%） |
+|---|---|---|
+| 医疗检索 R@1（2048/1024/512 维） | 1.000 | **1.000（全维度保持）** |
+| 常识检索 R@1（8 题，2048 维） | 0.875 | 0.750（1024/512 维 0.875 持平） |
+| 常识检索 R@5 | 1.000 | 1.000 |
+| 嵌入漂移（103 条余弦） | 1.000 | mean **0.941** / min 0.861 |
+| 相似度矩阵 \|Δ\| | 0 | mean 0.033 / max 0.149 |
+
+**结论**：医疗场景检索完全无损，通用能力仅常识集掉 1 题（8 题小样本，1024/512 维无损），换来 **−39% 文件体积与 −36% 运行内存**。R@5/R@10 全程 1.0。
+
+备注：本机 CPU 无原生 BF16，fp32 前向反而比 bf16 快 ~4.5×（GPU 上仍用 bf16）；INT8 量化与 LoRA 微调未执行（分别缺 bitsandbytes / peft，且无 GPU 训练条件）。
 
 ## 目录结构
 
@@ -8,16 +58,26 @@
 wemm-medical-embedding/
 ├── README.md
 ├── requirements.txt
-├── config.yaml
+├── config.yaml              # model_path 指向最终模型
 ├── scripts/
-│   ├── strip_vision.py    # 删视觉塔，保存纯文本权重
-│   ├── train_lora.py      # LoRA 对比学习微调
-│   ├── encode.py          # 推理 encode
-│   └── eval.py            # 医疗/通用双线评估
+│   ├── strip_vision.py      # 删视觉塔（Round 1）
+│   ├── prune_ffn.py         # 医疗领域校准 FFN 剪枝（Round 3）
+│   ├── benchmark_thin.py    # 标准 benchmark（文件/内存/吞吐/检索）
+│   ├── compare_thin.py      # 模型间嵌入漂移对比
+│   ├── train_lora.py        # LoRA 对比学习微调（未执行）
+│   ├── encode.py            # 推理 encode
+│   └── eval.py              # 医疗/通用双线评估
 ├── data/
-│   ├── train.sample.jsonl # 数据样例
-│   └── eval_medical.jsonl # 医疗评估集
-└── outputs/               # 训练输出
+│   ├── train.jsonl / train.sample.jsonl
+│   ├── eval_medical.jsonl   # 医疗评估集
+│   └── eval_commonsense.jsonl  # 常识评估集（自生成）
+├── docs/
+│   ├── architecture_principle.md
+│   ├── benchmark_thin.md    # 瘦身两轮 benchmark 记录
+│   └── prune_ffn.md         # 剪枝阶梯记录与采纳决定
+└── outputs/
+    ├── wemm-text-only/          # R1+R2 产物（3.76GB 基线）
+    └── wemm-medical-pruned25/   # 最终模型（3.31GB）
 ```
 
 ## 前置准备

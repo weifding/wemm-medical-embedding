@@ -9,8 +9,9 @@ A. 同口径 model.embedding()：原始完整模型 vs 瘦身模型 —— 瘦�
 B. 旧 encode.py 口径（原始模型 forward 的 logits 池化）vs 新口径（瘦身模型 hidden 池化）
    —— bug 修复前后下游实际拿到的向量差异与检索得分变化
 
-用法: python scripts/compare_thin.py
+用法: python scripts/compare_thin.py [--full_model PATH] [--thin_model PATH] [--skip_legacy]
 """
+import argparse
 import json
 import os
 import sys
@@ -118,6 +119,14 @@ def upper_tri(s):
 
 
 def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--full_model", default=FULL_MODEL, help="对比基准（左）模型")
+    p.add_argument("--thin_model", default=THIN_MODEL, help="对比目标（右）模型")
+    p.add_argument("--skip_legacy", action="store_true",
+                   help="跳过 B 段（旧 logits 口径），A 段嵌入漂移+检索仍会算")
+    args = p.parse_args()
+    full_model_path, thin_model_path = args.full_model, args.thin_model
+
     items_by_ds = {name: [it for p in paths for it in load_items(p)]
                    for name, paths in DATA_FILES.items()}
     all_items = [it for v in items_by_ds.values() for it in v]
@@ -130,33 +139,34 @@ def main():
           f"常识 {sum(1 for t in texts if text_ds[t]=='常识')})")
     index = {t: i for i, t in enumerate(texts)}
 
-    # ---------- 原始完整模型 ----------
+    # ---------- 基准模型 ----------
     t0 = time.time()
-    print(f"\n[1/4] 加载原始完整模型: {FULL_MODEL}")
-    tok_full = AutoTokenizer.from_pretrained(FULL_MODEL, trust_remote_code=True)
-    full = AutoModel.from_pretrained(FULL_MODEL, trust_remote_code=True,
+    print(f"\n[1/4] 加载基准模型: {full_model_path}")
+    tok_full = AutoTokenizer.from_pretrained(full_model_path, trust_remote_code=True)
+    full = AutoModel.from_pretrained(full_model_path, trust_remote_code=True,
                                      torch_dtype=DTYPE, low_cpu_mem_usage=True)
     full.eval()
     print(f"  加载完成 {time.time()-t0:.0f}s")
     t0 = time.time()
     e_full = embed_hidden(full, tok_full, texts)
-    e_old = embed_logits_legacy(full, tok_full, texts)
-    print(f"  原始 embedding + 旧logits口径 完成 {time.time()-t0:.0f}s")
+    e_old = None if args.skip_legacy else embed_logits_legacy(full, tok_full, texts)
+    print(f"  基准 embedding 完成 {time.time()-t0:.0f}s"
+          + ("" if args.skip_legacy else " (含旧logits口径)"))
     del full
     import gc
     gc.collect()
 
-    # ---------- 瘦身模型 ----------
+    # ---------- 对比模型 ----------
     t0 = time.time()
-    print(f"[2/4] 加载瘦身模型: {THIN_MODEL}")
-    tok_thin = AutoTokenizer.from_pretrained(THIN_MODEL, trust_remote_code=True)
-    thin = AutoModel.from_pretrained(THIN_MODEL, trust_remote_code=True,
+    print(f"[2/4] 加载对比模型: {thin_model_path}")
+    tok_thin = AutoTokenizer.from_pretrained(thin_model_path, trust_remote_code=True)
+    thin = AutoModel.from_pretrained(thin_model_path, trust_remote_code=True,
                                      torch_dtype=DTYPE, low_cpu_mem_usage=True)
     thin.eval()
     print(f"  加载完成 {time.time()-t0:.0f}s")
     t0 = time.time()
     e_thin = embed_hidden(thin, tok_thin, texts)
-    print(f"  瘦身 embedding 完成 {time.time()-t0:.0f}s")
+    print(f"  对比模型 embedding 完成 {time.time()-t0:.0f}s")
 
     # ---------- A: 同口径对比 ----------
     print("\n" + "=" * 64)
@@ -175,19 +185,20 @@ def main():
               f"mean_rank 原始={r_full['mean_rank']:.2f} 瘦身={r_thin['mean_rank']:.2f}")
 
     # ---------- B: 旧口径 vs 新口径 ----------
-    print("\n" + "=" * 64)
-    print("B. 旧 encode.py 口径(logits, 原始模型) vs 新口径(hidden, 瘦身模型)")
-    print("=" * 64)
-    print(f"向量维度: 旧={e_old.shape[1]}  新={e_thin.shape[1]}")
-    s_old, s_new = sim_matrix(e_old), sim_matrix(e_thin)
-    corr = np.corrcoef(upper_tri(s_old), upper_tri(s_new))[0, 1]
-    print(f"成对相似度矩阵上三角相关系数: {corr:.4f}")
-    for name, items in items_by_ds.items():
-        r_old = retrieval_scores(items, e_old, texts)
-        r_new = retrieval_scores(items, e_thin, texts)
-        print(f"  [{name}] R@1 旧={r_old['R@1']:.3f} 新={r_new['R@1']:.3f} | "
-              f"R@5 旧={r_old['R@5']:.3f} 新={r_new['R@5']:.3f} | "
-              f"mean_rank 旧={r_old['mean_rank']:.2f} 新={r_new['mean_rank']:.2f}")
+    if e_old is not None:
+        print("\n" + "=" * 64)
+        print("B. 旧 encode.py 口径(logits, 基准模型) vs 新口径(hidden, 对比模型)")
+        print("=" * 64)
+        print(f"向量维度: 旧={e_old.shape[1]}  新={e_thin.shape[1]}")
+        s_old, s_new = sim_matrix(e_old), sim_matrix(e_thin)
+        corr = np.corrcoef(upper_tri(s_old), upper_tri(s_new))[0, 1]
+        print(f"成对相似度矩阵上三角相关系数: {corr:.4f}")
+        for name, items in items_by_ds.items():
+            r_old = retrieval_scores(items, e_old, texts)
+            r_new = retrieval_scores(items, e_thin, texts)
+            print(f"  [{name}] R@1 旧={r_old['R@1']:.3f} 新={r_new['R@1']:.3f} | "
+                  f"R@5 旧={r_old['R@5']:.3f} 新={r_new['R@5']:.3f} | "
+                  f"mean_rank 旧={r_old['mean_rank']:.2f} 新={r_new['mean_rank']:.2f}")
 
     # ---------- 明细示例 ----------
     print("\n逐文本余弦明细 (原始 vs 瘦身, 按 |1-cos| 降序前5):")
