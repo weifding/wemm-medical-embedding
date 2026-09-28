@@ -1,0 +1,7 @@
+.mimocode/
+models/
+outputs/
+data/raw/
+__pycache__/
+*.pyc
+.cache/

@@ -1,0 +1,36 @@
+# WeMM 医疗 embedding 项目配置
+
+# 纯文本权重路径（已抽视觉塔，strip_vision.py 输出，推理/训练用）
+model_path: "E:/ChatGPT/wemm-medical-embedding/outputs/wemm-text-only"
+# 原始完整权重存档: E:/ChatGPT/wemm-medical-embedding/models/WeMM-Embedding-2B
+
+# 输出目录
+strip_output: "outputs/wemm-text-only"
+lora_output: "outputs/lora-adapter"
+merged_output: "outputs/wemm-medical-merged"
+
+# 数据
+train_file: "data/train.jsonl"
+eval_file: "data/eval_medical.jsonl"
+
+# LoRA
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "v_proj"]
+
+# 训练
+train:
+  lr: 1.0e-4
+  batch_size: 16
+  epochs: 3
+  max_length: 512
+  temperature: 0.02
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+
+# 推理
+infer:
+  dtype: bfloat16
+  matryoshka_dim: 1024   # 可选 2048/1024/512
